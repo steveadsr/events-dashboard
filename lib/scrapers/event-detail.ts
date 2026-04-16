@@ -1,5 +1,5 @@
 import FirecrawlApp from "firecrawl";
-import Anthropic from "@anthropic-ai/sdk";
+import { fal } from "@fal-ai/client";
 import { db } from "@/lib/db";
 import { events, promoters } from "@/lib/db/schema";
 import { eq, isNull, sql, and, isNotNull } from "drizzle-orm";
@@ -9,6 +9,8 @@ import { scrapeUrl } from "@/lib/scrapers/firecrawl";
 // Platforms where we can meaningfully scrape event detail pages
 const DETAIL_SCRAPE_PLATFORMS = new Set([
   "Ticketmelon", "Eventpop", "TheConcert", "ThaiTicketMajor", "AllTicket", "TicketTier",
+  // Venue/promoter platforms — their individual event pages scrape fine
+  "Impact", "LiveNationTero", "UOBLive", "Thunderdome",
 ]);
 
 // How many event pages to enrich PER PLATFORM per scrape run
@@ -16,8 +18,16 @@ const MAX_DETAIL_PAGES_PER_PLATFORM = 10;
 // Upper limit for a force-enrich run (per platform)
 const MAX_DETAIL_PAGES_FORCE_PER_PLATFORM = 40;
 
+// Per-platform waitFor (ms). Eventpop is a heavy SPA — needs more time.
+const PLATFORM_WAIT_MS: Record<string, number> = {
+  Eventpop: 8000,
+  AllTicket: 8000,
+};
+
 interface ExtractedEventDetail {
   image_url: string | null;
+  date_start: string | null;
+  date_end: string | null;
   promoter_name: string | null;
   organizer_page_url: string | null;
   event_status: string | null;
@@ -33,17 +43,26 @@ interface ExtractedEventDetail {
 // Per-platform prompts tailored to each site's page structure.
 const PLATFORM_DETAIL_PROMPTS: Record<string, string> = {
   Ticketmelon:
-    `From this event page extract: image_url (hero image), promoter_name (organizer), organizer_page_url (link to organizer page, relative ok), ticket_tiers (array of {name, price_text, status: on_sale/sold_out/sale_ended/unavailable, remaining}). Return JSON. Null if not found.`,
+    `From this event page extract: image_url (hero image), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer), organizer_page_url (link to organizer page, relative ok), ticket_tiers (array of {name, price_text, status: on_sale/sold_out/sale_ended/unavailable, remaining}). Return JSON. Null if not found.`,
   Eventpop:
-    `Extract: image_url (event poster), promoter_name (Organizer section/tab name), organizer_page_url (organizer profile link), ticket_tiers ({name, price_text, status: on_sale/sold_out, remaining}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+    `Extract: image_url (event poster), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (Organizer section/tab name), organizer_page_url (organizer profile link), ticket_tiers ({name, price_text, status: on_sale/sold_out, remaining}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
   TheConcert:
-    `Extract: image_url (event banner/poster), promoter_name (organizer or producer name — NOT "Verified fan" membership text, NOT platform name), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+    `Extract: image_url (event banner/poster), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer or producer name — NOT "Verified fan" membership text, NOT platform name), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
   ThaiTicketMajor:
-    `Extract: image_url (event poster), promoter_name (organizer in notes/terms, often Live Nation Tero, BEC-Tero, or GMM Grammy), ticket_tiers ({name, price_text, status: on_sale/sold_out}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+    `Extract: image_url (event poster), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer in notes/terms, often Live Nation Tero, BEC-Tero, or GMM Grammy), ticket_tiers ({name, price_text, status: on_sale/sold_out}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
   AllTicket:
-    `Extract: image_url (event poster), promoter_name (organizer in description or terms, e.g. GMMShow, GMM Grammy, BEC-Tero), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+    `Extract: image_url (event poster), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer in description or terms, e.g. GMMShow, GMM Grammy, BEC-Tero), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
   TicketTier:
-    `Extract: image_url (event poster), promoter_name (Organizer box/section), organizer_page_url (organizer profile link), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+    `Extract: image_url (event poster), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (Organizer box/section), organizer_page_url (organizer profile link), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+  // Venue/promoter platforms — same basic extraction, no organizer profile links needed
+  Impact:
+    `Extract: image_url (event poster/banner), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer company name), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+  LiveNationTero:
+    `Extract: image_url (event poster/banner), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (Live Nation Tero or specific organizer), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+  UOBLive:
+    `Extract: image_url (event poster/banner), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer/presenter company name), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
+  Thunderdome:
+    `Extract: image_url (event poster/banner), date_start (ISO 8601 start date), date_end (ISO 8601 end date if multi-day, else null), promoter_name (organizer company name), ticket_tiers ({name, price_text, status: on_sale/sold_out/coming_soon}), event_status (on_sale/sold_out/coming_soon). Return JSON. Null if not found.`,
 };
 
 // Fallback prompt if platform not in map above
@@ -100,9 +119,9 @@ async function extractViaVision(
   eventUrl: string,
   platformName: string,
 ): Promise<ExtractedEventDetail | null> {
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicApiKey) {
-    console.warn("[event-detail] ANTHROPIC_API_KEY not set — skipping vision fallback");
+  const falKey = process.env.FAL_KEY;
+  if (!falKey) {
+    console.warn("[event-detail] FAL_KEY not set — skipping vision fallback");
     return null;
   }
 
@@ -121,10 +140,10 @@ async function extractViaVision(
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const r = result as any;
-    const screenshotBase64: string | null = r.screenshot ?? null;
+    const screenshot: string | null = r.screenshot ?? null;
     const rawHtml: string | null = r.rawHtml ?? null;
 
-    if (!screenshotBase64) {
+    if (!screenshot) {
       console.warn(`[event-detail] Vision fallback: no screenshot returned for ${eventUrl}`);
       return null;
     }
@@ -139,50 +158,44 @@ async function extractViaVision(
       }
     }
 
-    // Use Claude vision to extract ticket tiers and status from the screenshot
-    const client = new Anthropic({ apiKey: anthropicApiKey });
+    // Firecrawl v1+ returns a hosted URL; older versions return raw base64.
+    // OpenRouter image_url accepts both: a URL directly, or a data URI for base64.
+    const imageUrlForModel = screenshot.startsWith("http")
+      ? screenshot
+      : `data:image/png;base64,${screenshot.replace(/^data:image\/\w+;base64,/, "")}`;
 
-    // Firecrawl v1+ returns a hosted URL for screenshot format, not raw base64.
-    // Detect which we have and use the appropriate Anthropic image source type.
-    const isUrl = screenshotBase64.startsWith("http");
-    const imageSource = isUrl
-      ? ({ type: "url" as const, url: screenshotBase64 })
-      : ({
-          type: "base64" as const,
-          media_type: "image/png" as const,
-          data: screenshotBase64.replace(/^data:image\/\w+;base64,/, ""),
-        });
+    const model = process.env.LLM_MODEL ?? "anthropic/claude-3.5-sonnet";
+    fal.config({ credentials: falKey });
 
-    const message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: imageSource,
-            },
-            {
-              type: "text",
-              text: `This is a ${platformName} event ticketing page. Extract:
+    const falResult = await fal.run("openrouter/router" as Parameters<typeof fal.run>[0], {
+      input: {
+        model,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: imageUrlForModel } },
+              {
+                type: "text",
+                text: `This is a ${platformName} event ticketing page. Extract:
 1. ticket_tiers: array of {name, price_text (Thai baht amount as string), status: "on_sale"|"sold_out"|"unavailable"}
 2. event_status: "on_sale"|"sold_out"|"coming_soon"|"pre_sale"
 3. promoter_name: the organizer/promoter name if clearly shown
 
 Return ONLY valid JSON: {"ticket_tiers": [...], "event_status": "...", "promoter_name": null}
 Use null for fields not visible. If no tiers visible, use empty array.`,
-            },
-          ],
-        },
-      ],
-    });
+              },
+            ],
+          },
+        ],
+        max_tokens: 1024,
+        temperature: 0.1,
+      },
+    }) as { output?: { choices?: Array<{ message?: { content?: string } }> } };
 
-    const responseText = message.content[0]?.type === "text" ? message.content[0].text : null;
+    const responseText = falResult?.output?.choices?.[0]?.message?.content ?? null;
     if (!responseText) return null;
 
-    // Parse JSON from response (may be wrapped in markdown code blocks)
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
@@ -196,6 +209,8 @@ Use null for fields not visible. If no tiers visible, use empty array.`,
 
     return {
       image_url: imageUrl,
+      date_start: null,
+      date_end: null,
       promoter_name: parsed.promoter_name ?? null,
       organizer_page_url: null,
       event_status: parsed.event_status ?? null,
@@ -235,7 +250,7 @@ export async function enrichEventDetails(forceAll = false): Promise<number> {
   // consume all enrichment slots every run.
   const needsDataFilter = forceAll
     ? ""
-    : `AND (promoter_id IS NULL OR image_url IS NULL OR jsonb_array_length(COALESCE(ticket_tiers, '[]'::jsonb)) = 0)
+    : `AND (promoter_id IS NULL OR image_url IS NULL OR date_end IS NULL OR jsonb_array_length(COALESCE(ticket_tiers, '[]'::jsonb)) = 0)
        AND (raw->>'detailScrapedAt' IS NULL OR (raw->>'detailScrapedAt')::timestamptz < NOW() - INTERVAL '7 days')`;
 
   // Select up to N events PER PLATFORM so all platforms get enrichment slots each run.
@@ -246,12 +261,13 @@ export async function enrichEventDetails(forceAll = false): Promise<number> {
     SELECT * FROM (
       SELECT *, ROW_NUMBER() OVER (PARTITION BY platform ORDER BY (raw->>'detailScrapedAt') NULLS FIRST, id) AS rn
       FROM events
-      WHERE platform IN ('Ticketmelon','Eventpop','TheConcert','ThaiTicketMajor','AllTicket','TicketTier')
+      WHERE platform IN ('Ticketmelon','Eventpop','TheConcert','ThaiTicketMajor','AllTicket','TicketTier',
+                         'Impact','LiveNationTero','UOBLive','Thunderdome')
         AND raw->>'eventUrl' IS NOT NULL
         AND raw->>'eventUrl' NOT ILIKE '%/N/A%'
         AND raw->>'eventUrl' NOT ILIKE '%/null%'
         AND raw->>'eventUrl' NOT SIMILAR TO 'https?://[^/]+/?#?'
-        AND status IN ('PRE_SALE','ON_SALE','COMING_SOON','UNKNOWN')
+        AND status IN ('PRE_SALE','ON_SALE','COMING_SOON','UNKNOWN','SOLD_OUT')
         ${sql.raw(needsDataFilter)}
     ) ranked
     WHERE rn <= ${limitPerPlatform}
@@ -283,15 +299,9 @@ export async function enrichEventDetails(forceAll = false): Promise<number> {
     try {
       console.log(`[event-detail] Scraping ${event.platform} detail: ${eventUrl}`);
 
-      const result = await app.scrapeUrl(eventUrl, {
-        formats: ["json"],
-        jsonOptions: { prompt },
-        waitFor: 6000,
-        timeout: 45000,
-      });
-
-      // Stamp the attempt time regardless of outcome so the 7-day cooldown kicks in.
-      // This prevents permanently-failed events from consuming slots on every run.
+      // Stamp the attempt time BEFORE scraping so the 7-day cooldown always kicks in,
+      // even if scrapeUrl() throws (network error, quota exceeded, etc.).
+      // Without this, a permanently-failing URL would retry on every scrape run.
       const nowIso = new Date().toISOString();
       await db.execute(sql`
         UPDATE events
@@ -299,13 +309,33 @@ export async function enrichEventDetails(forceAll = false): Promise<number> {
         WHERE id = ${event.id}
       `);
 
+      const waitFor = PLATFORM_WAIT_MS[event.platform] ?? 6000;
+      const result = await app.scrapeUrl(eventUrl, {
+        formats: ["json"],
+        jsonOptions: { prompt },
+        waitFor,
+        timeout: 45000,
+      });
+
       if (!result.success) {
         console.warn(`[event-detail] Failed ${eventUrl}`);
         continue;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let extracted = (result as any).json as ExtractedEventDetail | null;
+      const r = result as any;
+      let extracted = r.json as ExtractedEventDetail | null;
+
+      // Metadata fallback: Firecrawl always returns og:image in metadata even when
+      // LLM JSON extraction misses it. Use it to fill a missing image_url before
+      // triggering the expensive vision fallback.
+      if (extracted && !extracted.image_url) {
+        const ogImage = r.metadata?.ogImage as string | null | undefined;
+        if (ogImage) {
+          extracted = { ...extracted, image_url: ogImage };
+          console.log(`[event-detail] Using og:image metadata fallback for ${event.platform}`);
+        }
+      }
 
       // Vision fallback: if Firecrawl LLM extraction returned nothing (common on Eventpop/AllTicket
       // due to JS rendering complexity), re-scrape with screenshot + Claude vision.
@@ -376,12 +406,21 @@ export async function enrichEventDetails(forceAll = false): Promise<number> {
       const newPriority = detailStatus ? (STATUS_PRIORITY[detailStatus] ?? 0) : 0;
       const statusUpdate = newPriority > currentPriority ? detailStatus : undefined;
 
+      // Parse date_start / date_end from enrichment if provided
+      const enrichedStart = extracted.date_start ? new Date(extracted.date_start) : null;
+      const enrichedEnd = extracted.date_end ? new Date(extracted.date_end) : null;
+
       // Update the event record
       await db.update(events).set({
         promoterId: promoterId ?? event.promoterId,
         imageUrl: extracted.image_url ?? event.imageUrl ?? undefined,
         ticketTiers: tiers.length > 0 ? tiers : event.ticketTiers ?? [],
         ...(statusUpdate ? { status: statusUpdate } : {}),
+        // Use enriched dates only if they look valid and provide new info
+        ...(enrichedStart && !isNaN(enrichedStart.getTime()) && !event.date
+          ? { date: enrichedStart } : {}),
+        ...(enrichedEnd && !isNaN(enrichedEnd.getTime()) && !event.dateEnd
+          ? { dateEnd: enrichedEnd } : {}),
       }).where(eq(events.id, event.id));
 
       enriched++;

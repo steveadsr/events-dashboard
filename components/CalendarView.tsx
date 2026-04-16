@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { isExcludedEvent } from "@/lib/utils";
 
@@ -11,6 +11,7 @@ interface CalEvent {
   status: string;
   type: string | null;
   date: string | null;
+  dateEnd: string | null;
   promoterId: string | null;
   promoterName: string | null;
   venueId: string | null;
@@ -74,7 +75,10 @@ function buildGrid(year: number, month: number): (Date | null)[][] {
 }
 
 function isoDay(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 export function CalendarView() {
@@ -90,6 +94,21 @@ export function CalendarView() {
   const [platformFilter, setPlatformFilter] = useState("");
   const [venueFilter, setVenueFilter] = useState("");
   const [promoterFilter, setPromoterFilter] = useState("");
+
+  // Overflow popover
+  const [popover, setPopover] = useState<{ day: string; events: CalEvent[] } | null>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!popover) return;
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopover(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [popover]);
 
   // Fetch events + key venues when month changes
   useEffect(() => {
@@ -127,14 +146,26 @@ export function CalendarView() {
     return true;
   }), [rawEvents, platformFilter, venueFilter, promoterFilter]);
 
-  // Map day string → events
+  // Map day string → events; multi-day events appear on every day they span
   const eventsByDay = useMemo(() => {
     const map = new Map<string, CalEvent[]>();
     for (const e of events) {
       if (!e.date) continue;
-      const day = e.date.slice(0, 10);
-      if (!map.has(day)) map.set(day, []);
-      map.get(day)!.push(e);
+      const start = new Date(e.date);
+      const end = e.dateEnd ? new Date(e.dateEnd) : start;
+      // Walk each day from start to end (capped at 60 days to avoid runaway loops)
+      const cursor = new Date(start);
+      let steps = 0;
+      while (cursor <= end && steps < 60) {
+        const day = isoDay(cursor);
+        if (!map.has(day)) map.set(day, []);
+        // Avoid duplicates if already added (shouldn't happen but safety check)
+        if (!map.get(day)!.some((x) => x.id === e.id)) {
+          map.get(day)!.push(e);
+        }
+        cursor.setDate(cursor.getDate() + 1);
+        steps++;
+      }
     }
     return map;
   }, [events]);
@@ -322,7 +353,16 @@ export function CalendarView() {
                               </button>
                             ))}
                             {dayEvents.length > 4 && (
-                              <span style={{ fontSize: 10, color: "var(--ds-muted)", paddingLeft: 4 }}>
+                              <span
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  setPopover({ day: isoDay(day!), events: dayEvents });
+                                }}
+                                style={{
+                                  fontSize: 10, color: "var(--ds-accent)", paddingLeft: 4,
+                                  cursor: "pointer", userSelect: "none",
+                                }}
+                              >
                                 +{dayEvents.length - 4} more
                               </span>
                             )}
@@ -337,6 +377,87 @@ export function CalendarView() {
           </tbody>
         </table>
       </div>
+
+      {/* Overflow popover */}
+      {popover && (
+        <div
+          ref={popoverRef}
+          style={{
+            position: "fixed",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 200,
+            background: "var(--ds-surface)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 10,
+            boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
+            minWidth: 280,
+            maxWidth: 360,
+            overflow: "hidden",
+          }}
+        >
+          <div style={{
+            padding: "10px 14px",
+            borderBottom: "1px solid var(--ds-border)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ds-text)" }}>
+              {new Date(popover.day + "T00:00:00").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })}
+            </span>
+            <button
+              onClick={() => setPopover(null)}
+              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "var(--ds-muted)", padding: "0 2px", lineHeight: 1 }}
+            >
+              ×
+            </button>
+          </div>
+          <div style={{ maxHeight: 320, overflowY: "auto" }}>
+            {popover.events.map((ev) => (
+              <button
+                key={ev.id}
+                onClick={() => { setPopover(null); router.push(`/events/${ev.id}`); }}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 14px",
+                  background: "transparent",
+                  border: "none",
+                  borderBottom: "1px solid var(--ds-border-light)",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}>
+                  <div style={{
+                    width: 3,
+                    height: 32,
+                    borderRadius: 2,
+                    background: statusColor(ev.status),
+                    flexShrink: 0,
+                  }} />
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: "var(--ds-text)", lineHeight: 1.3 }}>
+                      {ev.name}
+                    </div>
+                    {ev.venueName && (
+                      <div style={{ fontSize: 11, color: "var(--ds-muted)", marginTop: 2 }}>
+                        {ev.venueName}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Legend */}
       <div

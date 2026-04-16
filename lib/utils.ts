@@ -125,3 +125,27 @@ export function isExcludedEvent(name: string, type: string | null): boolean {
   if (type && FAN_TYPE_RE.test(type)) return true;
   return false;
 }
+
+/**
+ * Format a date or date range for display.
+ * Single: "9 Jun 2026"
+ * Same month: "9–10 Jun 2026"
+ * Cross month: "30 Jun – 2 Jul 2026"
+ */
+export function formatDateRange(date: string | null, dateEnd?: string | null): string {
+  if (!date) return "—";
+  const start = new Date(date);
+  if (!dateEnd || dateEnd === date || dateEnd.slice(0, 10) === date.slice(0, 10)) {
+    return start.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
+  }
+  const end = new Date(dateEnd);
+  const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
+  if (sameMonth) {
+    const d1 = start.toLocaleDateString("en-GB", { day: "numeric" });
+    const d2 = end.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
+    return `${d1}–${d2}`;
+  }
+  const d1 = start.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const d2 = end.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "2-digit" });
+  return `${d1} – ${d2}`;
+}

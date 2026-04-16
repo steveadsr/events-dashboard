@@ -43,9 +43,10 @@ function richness(e: typeof events.$inferSelect): number {
   return score;
 }
 
-// Platforms that are ticket-selling sites — cross-platform dedup runs between these
-const TICKET_PLATFORMS = new Set([
+// All known event platforms — cross-platform dedup runs across all of these
+const ALL_EVENT_PLATFORMS = new Set([
   "Ticketmelon", "ThaiTicketMajor", "TheConcert", "Eventpop", "AllTicket", "TicketTier",
+  "LiveNationTero", "UOBLive", "Impact", "Thunderdome",
 ]);
 
 function sameOrNearDate(a: Date | null, b: Date | null): boolean {
@@ -128,7 +129,7 @@ export async function POST() {
   // Same event sold on multiple ticket sites (e.g. Ticketmelon + ThaiTicketMajor).
   // Requires: same date (±2 days) + 3+ significant word overlap at 80%.
   const ticketEvents = allEvents.filter(
-    (e) => TICKET_PLATFORMS.has(e.platform) && !toDelete.has(e.id)
+    (e) => ALL_EVENT_PLATFORMS.has(e.platform) && !toDelete.has(e.id)
   );
 
   // Group surviving ticket events by dedupKey, then check cross-platform within each group

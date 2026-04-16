@@ -61,6 +61,7 @@ export interface EventDetail {
   status: EventStatus;
   type: string | null;
   date: string | null;
+  dateEnd: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   imageUrl: string | null;

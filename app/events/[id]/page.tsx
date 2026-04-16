@@ -70,10 +70,14 @@ function TierStatusBadge({ status }: { status: TicketTier["status"] }) {
   );
 }
 
-function formatDate(iso: string | null): string {
+function formatDate(iso: string | null, isoEnd?: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+  if (isoEnd && isoEnd.slice(0, 10) !== iso.slice(0, 10)) {
+    const s = new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "long" });
+    const e = new Date(isoEnd).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+    return `${s} – ${e}`;
+  }
+  return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
 }
 
 function formatPrice(priceThb: number | null): string {
@@ -162,7 +166,7 @@ export default async function EventDetailPage({
                 {event.type && <TypeBadge type={event.type} />}
                 {event.date && (
                   <span style={{ fontSize: 13, color: "var(--ds-muted)" }}>
-                    {formatDate(event.date)}
+                    {formatDate(event.date, event.dateEnd)}
                   </span>
                 )}
               </div>
@@ -243,7 +247,7 @@ export default async function EventDetailPage({
                   )}
                 </DetailRow>
                 <DetailRow label="Date">
-                  {event.date ? formatDate(event.date) : <span style={{ color: "var(--ds-xmuted)" }}>—</span>}
+                  {event.date ? formatDate(event.date, event.dateEnd) : <span style={{ color: "var(--ds-xmuted)" }}>—</span>}
                 </DetailRow>
                 <DetailRow label="Type">
                   {event.type ?? <span style={{ color: "var(--ds-xmuted)" }}>—</span>}

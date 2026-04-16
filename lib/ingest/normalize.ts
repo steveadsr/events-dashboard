@@ -8,6 +8,12 @@ import type { RawEvent } from "@/lib/scrapers/firecrawl";
 // For these, we attempt cross-platform deduplication before inserting.
 const VENUE_SOURCE_PLATFORMS = new Set(["LiveNationTero", "UOBLive", "Impact", "Thunderdome"]);
 
+// Event types from venue platforms that are NOT concerts/entertainment and should be excluded.
+const NON_CONCERT_TYPES = new Set([
+  "exhibition trade", "exhibition public", "convention", "special event",
+  "expo", "summit", "conference", "seminar", "trade fair", "congress",
+]);
+
 /**
  * Normalize a name to a short dedup key: lowercase, strip punctuation,
  * take the first 5 significant words (skip articles/prepositions).
@@ -47,6 +53,7 @@ async function findCrossPlatformMatch(name: string) {
 interface NormalizedEvent {
   name: string;
   date: Date | null;
+  dateEnd: Date | null;
   venueName: string | null;
   promoterName: string | null;
   status: "PRE_SALE" | "ON_SALE" | "SOLD_OUT" | "CANCELLED" | "COMING_SOON" | "UNKNOWN";
@@ -92,6 +99,15 @@ export async function normalizeAndIngest(rawEvents: RawEvent[]): Promise<IngestR
         result.skipped++;
         continue;
       }
+      // Skip non-concert event types from venue source platforms (exhibitions, trade shows, etc.)
+      if (norm.type && VENUE_SOURCE_PLATFORMS.has(raw.platform)) {
+        const typeKey = norm.type.toLowerCase().trim();
+        if (NON_CONCERT_TYPES.has(typeKey)) {
+          console.log(`[normalize] Skipping non-concert event: "${raw.name}" (type: ${norm.type}, platform: ${raw.platform})`);
+          result.skipped++;
+          continue;
+        }
+      }
       try {
         const wasNew = await upsertEvent(raw, norm);
         if (wasNew) result.inserted++;
@@ -130,7 +146,8 @@ IMPORTANT: Only include events taking place in Thailand. If an event's venue is 
 
 For each event in the input array, return either null (not in Thailand) or a JSON object with:
 - name: cleaned English/Thai event name (remove platform artifacts)
-- date: ISO 8601 date string or null (Thai Buddhist year = Gregorian - 543). If the input dateRaw has no year, infer the year as the next upcoming occurrence of that date (current year if the date is still in the future, otherwise next year). Today's approximate year is 2026.
+- date: ISO 8601 date string for the START date or null (Thai Buddhist year = Gregorian - 543). If the input dateRaw has no year, infer the year as the next upcoming occurrence of that date (current year if the date is still in the future, otherwise next year). Today's approximate year is 2026.
+- dateEnd: ISO 8601 date string for the END date if the event spans multiple days (e.g. "2-3 MAY 2026" → dateEnd is "2026-05-03", "22 to 24 May" → dateEnd is the 24th). Return null if it's a single-day event or end date is unknown.
 - venueName: the venue's proper name only — building/hall/arena name in English, Title Case, NO address/city/country suffix (e.g. "Impact Arena" not "IMPACT Arena, Exhibition and Convention Center, Nonthaburi, Thailand"; "Prince Mahidol Hall, Mahidol University" not the full Thai address). Translate Thai venue names to English. Return null if unknown.
 - promoterName: the EVENT ORGANIZER or PROMOTER company name (e.g. BEC-Tero, GMM Grammy, Live Nation). NEVER use the performing artist/band name as the promoter. If the promoter cannot be determined from the text, return null. Venue names (Impact Arena, UOB Live, etc.) are also NOT promoters.
 - status: one of PRE_SALE | ON_SALE | SOLD_OUT | CANCELLED | COMING_SOON | UNKNOWN
@@ -178,6 +195,7 @@ ${JSON.stringify(batch.map((e) => ({
       return {
         ...item,
         date: item.date ? parseDate(item.date as unknown as string) : null,
+        dateEnd: item.dateEnd ? parseDate(item.dateEnd as unknown as string) : null,
         status: item.status ?? "UNKNOWN",
       };
     });
@@ -188,9 +206,11 @@ ${JSON.stringify(batch.map((e) => ({
 }
 
 function ruleBasedNormalize(raw: RawEvent): NormalizedEvent {
+  const { date, dateEnd } = parseDateRange(raw.dateRaw ?? "");
   return {
     name: raw.name,
-    date: raw.dateRaw ? parseDate(raw.dateRaw) : null,
+    date,
+    dateEnd,
     venueName: raw.venueRaw ?? null,
     promoterName: raw.promoterRaw ?? null,
     status: inferStatus(raw.statusRaw ?? ""),
@@ -239,6 +259,49 @@ function parseDate(raw: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Parse a raw date string that may represent a range (e.g. "2-3 MAY 2026", "22 to 24 May 2569").
+ * Returns { date: start, dateEnd: end | null }.
+ */
+function parseDateRange(raw: string): { date: Date | null; dateEnd: Date | null } {
+  if (!raw) return { date: null, dateEnd: null };
+
+  // Normalise Buddhist Era and Thai month names first
+  let s = raw.replace(/(\d{4})/g, (m, y) => (parseInt(y) > 2500 ? String(parseInt(y) - 543) : m));
+  for (const [thai, num] of Object.entries(THAI_MONTHS)) {
+    s = s.replace(new RegExp(thai, "g"), String(num));
+  }
+
+  // Patterns that indicate a range:
+  // "2-3 MAY 2026", "2–3 MAY 2026", "22 to 24 MAY 2026", "22-24 May 2026"
+  const rangeMatch =
+    s.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/) ||
+    s.match(/(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\s+(?:to|-)\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/i) ||
+    s.match(/(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/i);
+
+  if (rangeMatch) {
+    // Case 1: "2-3 MAY 2026" → same month/year for both
+    if (rangeMatch.length >= 5 && !rangeMatch[5]) {
+      const [, d1, d2, mon, yr] = rangeMatch;
+      const start = parseDate(`${d1} ${mon} ${yr}`);
+      const end = parseDate(`${d2} ${mon} ${yr}`);
+      if (start && end && end > start) return { date: start, dateEnd: end };
+      return { date: start, dateEnd: null };
+    }
+    // Case 2: "22 MAY 2026 to 24 MAY 2026"
+    if (rangeMatch.length >= 7) {
+      const [, d1, mon1, yr1, d2, mon2, yr2] = rangeMatch;
+      const start = parseDate(`${d1} ${mon1} ${yr1}`);
+      const end = parseDate(`${d2} ${mon2} ${yr2}`);
+      if (start && end && end > start) return { date: start, dateEnd: end };
+      return { date: start, dateEnd: null };
+    }
+  }
+
+  // No range found — single date
+  return { date: parseDate(raw), dateEnd: null };
+}
+
 // Ticket platforms list events because they're for sale — default UNKNOWN → ON_SALE
 const TICKET_PLATFORMS = new Set(["ThaiTicketMajor", "Ticketmelon", "TheConcert", "Eventpop", "AllTicket", "TicketTier"]);
 
@@ -280,6 +343,15 @@ async function upsertEvent(raw: RawEvent, norm: NormalizedEvent): Promise<boolea
     }
   }
 
+  // Strip trailing venue/location in parentheses from promoter names.
+  // Long parenthetical content (15+ chars) is almost always a venue clarification, not
+  // part of the company name. Short parens like "(THAILAND)" are kept.
+  // Example: "EntLabThailand (Bansomdejchaopraya Rajabhat University)" → "EntLabThailand"
+  function cleanPromoterName(name: string): string {
+    const stripped = name.replace(/\s*\([^)]{15,}\)\s*$/, "").trim();
+    return stripped || name;
+  }
+
   // Upsert promoter — reject garbage names the LLM writes when it can't determine promoter
   const JUNK_PROMOTER_NAMES = new Set([
     "unknown", "not specified", "null", "n/a", "tba", "tbd", "none",
@@ -298,20 +370,29 @@ async function upsertEvent(raw: RawEvent, norm: NormalizedEvent): Promise<boolea
   function isArtistAsPromoter(promoterName: string, eventName: string): boolean {
     const strip = (s: string) =>
       s.toLowerCase()
-        .replace(/\b(concert|tour|live|show|world tour|asia tour|bangkok|thailand|\d{4}|presents?|production)\b/g, "")
+        .replace(/\b(concert|tour|live|show|world tour|asia tour|bangkok|thailand|\d{4}|presents?|production|festival|music)\b/g, "")
         .replace(/[^a-z0-9\u0E00-\u0E7F\s]/g, " ")
         .replace(/\s+/g, " ")
         .trim();
     const pNorm = strip(promoterName);
     const eNorm = strip(eventName);
     if (pNorm.length < 3) return false;
-    // If the entire stripped promoter name appears inside the stripped event name, it's likely the artist
-    return eNorm.includes(pNorm);
+    // Both directions: promoter inside event OR event inside promoter (catches "Brand X presents EventName" as promoter)
+    return eNorm.includes(pNorm) || pNorm.includes(eNorm);
+  }
+
+  // Detect price-as-promoter: LLM occasionally writes ticket prices (e.g. "6,800, 5,800")
+  function isPriceAsPromoter(name: string): boolean {
+    return /^[\d,. /]+$/.test(name.trim());
   }
 
   const isJunkPromoter = (name: string) => {
     if (!name.trim()) return true;
     if (JUNK_PROMOTER_NAMES.has(name.toLowerCase().trim())) return true;
+    if (isPriceAsPromoter(name)) {
+      console.log(`[normalize] Rejected price-as-promoter: "${name}"`);
+      return true;
+    }
     if (isArtistAsPromoter(name, norm.name)) {
       console.log(`[normalize] Rejected artist-as-promoter: "${name}" in "${norm.name}"`);
       return true;
@@ -320,16 +401,17 @@ async function upsertEvent(raw: RawEvent, norm: NormalizedEvent): Promise<boolea
   };
 
   let promoterId: string | null = null;
-  if (norm.promoterName && !isJunkPromoter(norm.promoterName)) {
+  const cleanedPromoterName = norm.promoterName ? cleanPromoterName(norm.promoterName) : null;
+  if (cleanedPromoterName && !isJunkPromoter(cleanedPromoterName)) {
     const existing = await db.query.promoters.findFirst({
-      where: sql`lower(${promoters.canonicalName}) = lower(${norm.promoterName})`,
+      where: sql`lower(${promoters.canonicalName}) = lower(${cleanedPromoterName})`,
     });
     if (existing) {
       promoterId = existing.id;
     } else {
       const inserted = await db.insert(promoters).values({
-        canonicalName: norm.promoterName,
-        platformNames: { [raw.platform]: raw.promoterRaw ?? norm.promoterName },
+        canonicalName: cleanedPromoterName,
+        platformNames: { [raw.platform]: raw.promoterRaw ?? cleanedPromoterName },
         platformsActive: [raw.platform],
         venuesUsed: norm.venueName ? [norm.venueName] : [],
       }).returning({ id: promoters.id });
@@ -403,10 +485,13 @@ async function upsertEvent(raw: RawEvent, norm: NormalizedEvent): Promise<boolea
         ? (existing.status === "UNKNOWN" ? norm.status : existing.status)
         : norm.status,
       date: norm.date ?? existing.date ?? undefined,
+      dateEnd: norm.dateEnd ?? existing.dateEnd ?? undefined,
       lastSeenAt: new Date(),
       venueId: venueId ?? existing.venueId,
       promoterId: promoterId ?? existing.promoterId,
       type: norm.type ?? existing.type,
+      // Preserve existing image; fill in from listing scrape if missing (e.g. AllTicket)
+      imageUrl: existing.imageUrl ?? raw.imageUrl ?? undefined,
       raw: isCrossPlatformMatch ? existingRaw as object : mergedRaw as object,
     }).where(eq(events.id, existing.id));
     return false;
@@ -415,14 +500,27 @@ async function upsertEvent(raw: RawEvent, norm: NormalizedEvent): Promise<boolea
       platform: raw.platform,
       name: norm.name,
       date: norm.date ?? undefined,
+      dateEnd: norm.dateEnd ?? undefined,
       status: norm.status,
       type: norm.type,
       venueId,
       promoterId,
+      imageUrl: raw.imageUrl ?? undefined,
       raw: raw as object,
       firstSeenAt: new Date(),
       lastSeenAt: new Date(),
     });
+
+    // If this is a ticket platform, clean up any venue-platform shadow copies
+    // that were inserted before this ticket platform event was discovered.
+    if (!VENUE_SOURCE_PLATFORMS.has(raw.platform)) {
+      const crossMatch = await findCrossPlatformMatch(norm.name);
+      if (crossMatch && VENUE_SOURCE_PLATFORMS.has(crossMatch.platform)) {
+        await db.delete(events).where(eq(events.id, crossMatch.id));
+        console.log(`[normalize] Deleted venue-platform shadow: "${crossMatch.name}" (${crossMatch.platform}) — superseded by ${raw.platform}`);
+      }
+    }
+
     return true;
   }
 }

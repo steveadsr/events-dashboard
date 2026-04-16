@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { events, promoters, venues, dailyBriefs } from "@/lib/db/schema";
-import { desc, gte, sql, eq } from "drizzle-orm";
+import { desc, gte, sql, eq, and } from "drizzle-orm";
+import { FAN_EVENT_FILTER, THAILAND_ONLY_FILTER } from "@/lib/db/queries";
 
 const TWENTY_FOUR_HOURS = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
 
@@ -8,7 +9,7 @@ const TWENTY_FOUR_HOURS = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
 export async function generateDailyBrief(): Promise<void> {
   const since = TWENTY_FOUR_HOURS();
 
-  // New events in last 24h
+  // New events in last 24h — apply same filters as the UI (no fan meetings, Thailand only)
   const newEvents = await db
     .select({
       id: events.id,
@@ -22,7 +23,7 @@ export async function generateDailyBrief(): Promise<void> {
     .from(events)
     .leftJoin(promoters, eq(events.promoterId, promoters.id))
     .leftJoin(venues, eq(events.venueId, venues.id))
-    .where(gte(events.firstSeenAt, since))
+    .where(and(gte(events.firstSeenAt, since), THAILAND_ONLY_FILTER, FAN_EVENT_FILTER))
     .orderBy(desc(events.firstSeenAt))
     .limit(100);
 
@@ -119,9 +120,10 @@ export async function generateDailyBrief(): Promise<void> {
   console.log(`[brief] Generated daily brief with ${bullets.length} bullets covering ${newEvents.length} events`);
 }
 
+// True international = event name contains a non-Thailand country or city indicator.
+// Matches the same logic as detectInternational() in queries.ts.
 function isInternational(name: string): boolean {
-  const thaiPattern = /[\u0E00-\u0E7F]/;
-  return !thaiPattern.test(name) && name.length > 0;
+  return /\b(malaysia|kuala lumpur|\bkl\b|singapore|indonesia|jakarta|manila|philippines|vietnam|korea|japan|taiwan|hong kong|china|india|australia)\b/i.test(name);
 }
 
 function isExcludedType(type: string): boolean {

@@ -13,17 +13,17 @@ const byPlatform = await db.execute(sql`
     sum(case when raw->>'promoterRaw' ilike 'unknown' or raw->>'promoterRaw' is null then 1 else 0 end) as no_promoter_raw
   FROM events GROUP BY platform ORDER BY platform
 `);
-console.log("By platform:\n", JSON.stringify(byPlatform.rows, null, 2));
+console.log("By platform:\n", JSON.stringify(byPlatform, null, 2));
 
 const promoterNames = await db.execute(sql`
   SELECT canonical_name, active_event_count FROM promoters ORDER BY active_event_count DESC
 `);
-console.log("\nPromoters:\n", JSON.stringify(promoterNames.rows, null, 2));
+console.log("\nPromoters:\n", JSON.stringify(promoterNames, null, 2));
 
 const ticketmelonSample = await db.execute(sql`
   SELECT name, status, promoter_id, raw->>'eventUrl' as event_url, raw->>'promoterRaw' as promoter_raw
   FROM events WHERE platform = 'Ticketmelon' LIMIT 5
 `);
-console.log("\nTicketmelon sample:\n", JSON.stringify(ticketmelonSample.rows, null, 2));
+console.log("\nTicketmelon sample:\n", JSON.stringify(ticketmelonSample, null, 2));
 
 await client.end();

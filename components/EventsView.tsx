@@ -32,8 +32,21 @@ function CalendarIcon({ active }: { active: boolean }) {
   );
 }
 
+// Cards icon
+function CardsIcon({ active }: { active: boolean }) {
+  const c = active ? "var(--ds-text)" : "var(--ds-muted)";
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ display: "block" }}>
+      <rect x="1" y="1" width="6" height="7" rx="1.5" stroke={c} strokeWidth="1.5" />
+      <rect x="9" y="1" width="6" height="7" rx="1.5" stroke={c} strokeWidth="1.5" />
+      <rect x="1" y="10" width="6" height="5" rx="1.5" stroke={c} strokeWidth="1.5" />
+      <rect x="9" y="10" width="6" height="5" rx="1.5" stroke={c} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
 export function EventsView() {
-  const [view, setView] = useState<"table" | "calendar">("table");
+  const [view, setView] = useState<"table" | "calendar" | "cards">("cards");
 
   const btnStyle = (active: boolean): React.CSSProperties => ({
     display: "flex",
@@ -74,9 +87,21 @@ export function EventsView() {
         >
           <CalendarIcon active={view === "calendar"} />
         </button>
+        <button
+          style={btnStyle(view === "cards")}
+          onClick={() => setView("cards")}
+          title="Card view"
+          aria-label="Card view"
+        >
+          <CardsIcon active={view === "cards"} />
+        </button>
       </div>
 
-      {view === "table" ? <EventsInfiniteList /> : <CalendarView />}
+      {view === "calendar" ? (
+        <CalendarView />
+      ) : (
+        <EventsInfiniteList viewMode={view === "cards" ? "cards" : "table"} />
+      )}
     </div>
   );
 }

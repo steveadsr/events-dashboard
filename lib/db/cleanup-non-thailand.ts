@@ -47,24 +47,35 @@ function buildLikeConditions(field: string): string {
     .join(" OR ");
 }
 
+// Event types that should be excluded from the database.
+const EXCLUDED_TYPES = [
+  "Fan Meeting",
+];
+
 async function cleanupNonThailandEvents() {
   console.log("🔍 Scanning for non-Thailand events...\n");
 
-  // Find candidates: check name, raw->>'venueRaw', and raw->>'sourceUrl'
+  const excludedTypesCondition = EXCLUDED_TYPES
+    .map((t) => `lower(type) = lower('${t}')`)
+    .join(" OR ");
+
+  // Find candidates: check name, raw->>'venueRaw', excluded types
   // db.execute with postgres driver returns the rows directly as an array
   const rows = (await db.execute(sql.raw(`
-    SELECT id, name, platform,
+    SELECT id, name, platform, type,
            raw->>'venueRaw'   AS venue_raw,
            raw->>'sourceUrl'  AS source_url
     FROM events
     WHERE (${buildLikeConditions("name")})
        OR (${buildLikeConditions("raw->>'venueRaw'")})
+       OR (${excludedTypesCondition})
   `))) as unknown as Array<{
     id: string;
     name: string;
     platform: string;
     venue_raw: string | null;
     source_url: string | null;
+    type: string | null;
   }>;
 
   if (rows.length === 0) {
@@ -74,7 +85,7 @@ async function cleanupNonThailandEvents() {
 
   console.log(`Found ${rows.length} non-Thailand event(s) to remove:\n`);
   for (const row of rows) {
-    console.log(`  ✗  [${row.platform}] ${row.name}`);
+    console.log(`  ✗  [${row.platform}] ${row.name}${row.type ? ` (${row.type})` : ""}`);
     if (row.venue_raw) console.log(`       venue: ${row.venue_raw}`);
   }
 

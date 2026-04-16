@@ -4,6 +4,7 @@ import { PromoterGrid } from "@/components/PromoterGrid";
 import { VenueGrid } from "@/components/VenueGrid";
 import { BigEventTracker } from "@/components/BigEventTracker";
 import { ScrapeButton } from "@/components/ScrapeButton";
+import { SearchBar } from "@/components/SearchBar";
 
 // Use mock data when DATABASE_URL is not configured
 function getMockData() {
@@ -132,7 +133,10 @@ export default async function DashboardPage() {
             Thailand Market
           </span>
         </div>
-        <ScrapeButton lastScrape={data.lastScrape} />
+        <div className="flex items-center gap-3">
+          <SearchBar />
+          <ScrapeButton lastScrape={data.lastScrape} />
+        </div>
       </header>
 
       {/* Main content */}

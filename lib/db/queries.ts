@@ -1,6 +1,6 @@
 import { db } from "./index";
 import { events, promoters, venues, dailyBriefs, scrapeRuns } from "./schema";
-import { desc, gte, lt, sql, eq, and } from "drizzle-orm";
+import { desc, gte, lt, sql, eq, and, or, isNotNull } from "drizzle-orm";
 import type { TicketTier } from "@/lib/types";
 import type { SQL } from "drizzle-orm";
 import { KEY_VENUE_PATTERNS } from "@/lib/utils";
@@ -23,7 +23,9 @@ const EVENT_SELECT = (e = events, p = promoters, v = venues) => ({
   status: e.status,
   type: e.type,
   date: e.date,
+  dateEnd: e.dateEnd,
   firstSeenAt: e.firstSeenAt,
+  imageUrl: e.imageUrl,
   promoterId: e.promoterId,
   promoterName: p.canonicalName,
   venueId: e.venueId,
@@ -122,12 +124,14 @@ export async function getDashboardData() {
   const mapEvent = (e: typeof newEvents[number], forceNew?: boolean) => ({
     ...e,
     date: toISO(e.date),
+    dateEnd: toISO(e.dateEnd),
     firstSeenAt: toISO(e.firstSeenAt) ?? new Date().toISOString(),
     isNew24h: forceNew ?? (e.firstSeenAt ? e.firstSeenAt >= TWENTY_FOUR_HOURS() : false),
     isInternational: detectInternational(e.name, e.venueName, e.venueRaw),
     isKeyVenue: jsIsKeyVenue(e.isKeyVenue, e.venueRaw ?? null),
     venueRaw: e.venueRaw ?? null,
     eventUrl: e.eventUrl ?? null,
+    imageUrl: e.imageUrl ?? null,
   });
 
   return {
@@ -186,7 +190,7 @@ function detectInternational(name: string, venueName?: string | null, venueRaw?:
 }
 
 // SQL condition that excludes clearly non-Thailand events based on name + venue keywords
-const THAILAND_ONLY_FILTER = sql<boolean>`NOT (
+export const THAILAND_ONLY_FILTER = sql<boolean>`NOT (
   lower(COALESCE(${events.raw}->>'venueRaw', '')) ~*
     'malaysia|kuala lumpur|\\mkl\\M|singapore|indonesia|jakarta|manila|philippines|vietnam|korea|japan|taiwan|hong kong'
   OR lower(${events.name}) ~*
@@ -195,17 +199,17 @@ const THAILAND_ONLY_FILTER = sql<boolean>`NOT (
 
 // Exclude fan meetings, fan parties, health events, and similar non-commercial events.
 // Type field is matched broadly (substring) — "Fan Party", "Fan Meeting", "Health • Experience" all caught.
-const FAN_EVENT_FILTER = sql<boolean>`NOT (
+export const FAN_EVENT_FILTER = sql<boolean>`NOT (
   lower(${events.name}) ~*
     'fan meet|fanmeet|fan party|fanparty|fan fest|fan sign|fansign|fan con|fancon|fan engagement|fan call|fancall|fan cafe|meet (and|&) greet|hi([-\s])?touch|high touch|fan talk|fan event|fan day|fan showcase'
   OR lower(${events.name}) ~*
     'health (fair|expo|talk|seminar|forum|summit|check|screening)|wellness (fair|expo|seminar)|medical (fair|expo|seminar)|hospital (fair|event)|health (and|&) wellness|\blife expo\b'
   OR lower(COALESCE(${events.type}, '')) ~*
-    '\bfan\b|health|wellness|medical|seminar|conference|forum|summit|trade fair|exhibition|expo|fan meet|fan party|fan meeting|fan engagement'
+    '\bfan\b|health|wellness|medical|seminar|conference|forum|summit|trade fair|exhibition|expo|fan meet|fan party|fan meeting|fan engagement|convention|special event'
 )`;
 
 // Only show events with a future date, or no date at all (unknown date = still relevant)
-const FUTURE_DATES_FILTER = sql<boolean>`(${events.date} IS NULL OR ${events.date} >= CURRENT_DATE)`;
+export const FUTURE_DATES_FILTER = sql<boolean>`(${events.date} IS NULL OR ${events.date} >= CURRENT_DATE)`;
 
 export async function getEventsPage(
   cursor?: string,
@@ -234,9 +238,11 @@ export async function getEventsPage(
       status: events.status,
       type: events.type,
       date: events.date,
+      dateEnd: events.dateEnd,
       firstSeenAt: events.firstSeenAt,
       promoterName: promoters.canonicalName,
       venueName: venues.canonicalName,
+      imageUrl: events.imageUrl,
       venueRaw: sql<string | null>`(${events.raw}->>'venueRaw')`,
       eventUrl: sql<string | null>`(${events.raw}->>'eventUrl')`,
       isKeyVenue: sql<boolean>`(
@@ -260,12 +266,14 @@ export async function getEventsPage(
     events: data.map((e) => ({
       ...e,
       date: toISO(e.date),
+      dateEnd: toISO(e.dateEnd),
       firstSeenAt: toISO(e.firstSeenAt) ?? new Date().toISOString(),
       isNew24h: e.firstSeenAt ? Date.now() - e.firstSeenAt.getTime() < 86400000 : false,
       isInternational: detectInternational(e.name, e.venueName, e.venueRaw),
       isKeyVenue: jsIsKeyVenue(e.isKeyVenue, e.venueRaw ?? null),
       venueRaw: e.venueRaw ?? null,
       eventUrl: e.eventUrl ?? null,
+      imageUrl: e.imageUrl ?? null,
     })),
     nextCursor: hasMore ? data[data.length - 1].firstSeenAt?.toISOString() ?? null : null,
     hasMore,
@@ -287,6 +295,7 @@ export async function getCalendarEvents(year: number, month: number) {
         status: events.status,
         type: events.type,
         date: events.date,
+        dateEnd: events.dateEnd,
         promoterId: events.promoterId,
         promoterName: promoters.canonicalName,
         venueId: events.venueId,
@@ -305,8 +314,14 @@ export async function getCalendarEvents(year: number, month: number) {
       .where(and(
         THAILAND_ONLY_FILTER,
         FAN_EVENT_FILTER,
-        gte(events.date, start),
+        // Event starts before the month ends
         lt(events.date, end),
+        // AND either: starts within this month (single-day),
+        //         or: has a date_end that reaches into this month (multi-day span)
+        or(
+          gte(events.date, start),
+          and(isNotNull(events.dateEnd), gte(events.dateEnd, start))
+        ),
       ))
       .orderBy(events.date, events.name),
 
@@ -323,6 +338,7 @@ export async function getCalendarEvents(year: number, month: number) {
     events: rows.map((e) => ({
       ...e,
       date: toISO(e.date),
+      dateEnd: toISO(e.dateEnd),
       venueName: e.venueName ?? null,
       venueRaw: e.venueRaw ?? null,
       promoterName: e.promoterName ?? null,
@@ -344,6 +360,7 @@ export async function getEventById(id: string) {
       status: events.status,
       type: events.type,
       date: events.date,
+      dateEnd: events.dateEnd,
       firstSeenAt: events.firstSeenAt,
       lastSeenAt: events.lastSeenAt,
       imageUrl: events.imageUrl,
@@ -375,6 +392,7 @@ export async function getEventById(id: string) {
     status: row.status,
     type: row.type,
     date: toISO(row.date),
+    dateEnd: toISO(row.dateEnd),
     firstSeenAt: toISO(row.firstSeenAt) ?? new Date().toISOString(),
     lastSeenAt: toISO(row.lastSeenAt) ?? new Date().toISOString(),
     imageUrl: row.imageUrl ?? null,
@@ -451,7 +469,7 @@ export async function getPromoterById(id: string) {
     })
     .from(events)
     .leftJoin(venues, eq(events.venueId, venues.id))
-    .where(eq(events.promoterId, id))
+    .where(and(eq(events.promoterId, id), FAN_EVENT_FILTER, FUTURE_DATES_FILTER))
     .orderBy(desc(events.date));
 
   const toISO = (d: Date | null | undefined) => d?.toISOString() ?? null;
@@ -459,7 +477,7 @@ export async function getPromoterById(id: string) {
   return {
     id: promoter.id,
     canonicalName: promoter.canonicalName,
-    activeEventCount: promoter.activeEventCount,
+    activeEventCount: promoterEvents.length,
     platformsActive: (promoter.platformsActive ?? []) as string[],
     venuesUsed: (promoter.venuesUsed ?? []) as string[],
     organizerPageUrl: promoter.organizerPageUrl ?? null,

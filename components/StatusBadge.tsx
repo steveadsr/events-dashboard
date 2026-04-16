@@ -34,15 +34,14 @@ export function NewBadge() {
   return (
     <span
       style={{
-        backgroundColor: "var(--new-bg)",
-        color: "var(--new-text)",
-        border: "1px solid var(--new-border)",
-        fontSize: 10,
-        fontWeight: 600,
+        backgroundColor: "var(--ds-accent)",
+        color: "#fff",
+        fontSize: 9,
+        fontWeight: 700,
         padding: "2px 7px",
         borderRadius: 20,
         whiteSpace: "nowrap",
-        letterSpacing: "0.3px",
+        letterSpacing: "0.5px",
         textTransform: "uppercase" as const,
       }}
     >

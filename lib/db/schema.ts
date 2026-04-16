@@ -63,6 +63,7 @@ export const events = pgTable("events", {
   externalId: text("external_id"),
   name: text("name").notNull(),
   date: timestamp("date"),
+  dateEnd: timestamp("date_end"),
   venueId: uuid("venue_id").references(() => venues.id),
   promoterId: uuid("promoter_id").references(() => promoters.id),
   type: text("type"),

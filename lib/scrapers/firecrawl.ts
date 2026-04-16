@@ -11,6 +11,7 @@ export interface RawEvent {
   statusRaw: string | null;
   typeRaw: string | null;
   priceRaw: string | null;
+  imageUrl?: string | null; // poster image URL extracted from listing page (AllTicket)
 }
 
 // Shape Firecrawl's LLM should extract per page
@@ -24,6 +25,7 @@ interface ExtractedPageEvents {
     type: string | null;
     price: string | null;
     url: string | null;
+    image_url?: string | null; // available on some listing pages (AllTicket)
   }>;
 }
 
@@ -67,6 +69,7 @@ function resolveEventUrl(url: string | null, platformName: string): string | nul
 // Target platform configurations
 // timeoutMs: per-URL scrape timeout. Sites that consistently time out get a shorter
 // budget so they fail fast without blocking credits.
+// promptOverride: use instead of EXTRACT_PROMPT for platforms that need extra fields (e.g. image_url)
 const PLATFORMS = [
   {
     name: "ThaiTicketMajor",
@@ -100,9 +103,12 @@ const PLATFORMS = [
   },
   {
     name: "AllTicket",
-    urls: ["https://www.allticket.com/"],
+    // /group/rec shows all upcoming events; homepage redirects to same content
+    urls: ["https://www.allticket.com/group/rec"],
     timeoutMs: 60000,
-    waitForMs: 5000,
+    waitForMs: 6000,
+    // AllTicket listing page renders images alongside each event card — capture them
+    promptOverride: `List Thailand events only. Today is 2026. Each event: name, date (use 2026 if no year), venue, promoter, status, type, price, image_url (event poster/card image URL from the page), url. Return {"events": [...]}. Thai text ok.`,
   },
   {
     name: "TicketTier",
@@ -155,13 +161,14 @@ export async function scrapeUrl(
   url: string,
   timeoutMs = 60000,
   waitForMs = 5000,
+  promptOverride?: string,
 ): Promise<RawEvent[]> {
   try {
     console.log(`[scraper] Scraping ${platformName} — ${url}`);
 
     const result = await app.scrapeUrl(url, {
       formats: ["markdown", "json"],
-      jsonOptions: { prompt: EXTRACT_PROMPT },
+      jsonOptions: { prompt: promptOverride ?? EXTRACT_PROMPT },
       waitFor: waitForMs,
       timeout: timeoutMs,
     });
@@ -194,6 +201,7 @@ export async function scrapeUrl(
       statusRaw: e.status ?? null,
       typeRaw: e.type ?? null,
       priceRaw: e.price ?? null,
+      imageUrl: e.image_url ?? null,
     }));
   } catch (err) {
     console.error(`[scraper] Failed scraping ${url}:`, err);
@@ -212,7 +220,7 @@ export async function scrapeAllPlatforms(): Promise<RawEvent[]> {
 
   for (const platform of PLATFORMS) {
     for (const url of platform.urls) {
-      const events = await scrapeUrl(app, platform.name, url, platform.timeoutMs, platform.waitForMs ?? 5000);
+      const events = await scrapeUrl(app, platform.name, url, platform.timeoutMs, platform.waitForMs ?? 5000, (platform as { promptOverride?: string }).promptOverride);
       allEvents.push(...events);
     }
   }
