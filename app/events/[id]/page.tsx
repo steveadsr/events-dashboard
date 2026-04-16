@@ -26,6 +26,7 @@ function getMockEvent(id: string): EventDetail {
     venueId: null,
     venueName: "The Street Ratchada",
     isInternational: true,
+    dateEnd: null,
   };
 }
 
