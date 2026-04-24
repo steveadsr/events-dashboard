@@ -205,7 +205,8 @@ export const FAN_EVENT_FILTER = sql<boolean>`NOT (
   OR lower(${events.name}) ~*
     'health (fair|expo|talk|seminar|forum|summit|check|screening)|wellness (fair|expo|seminar)|medical (fair|expo|seminar)|hospital (fair|event)|health (and|&) wellness|\blife expo\b'
   OR lower(COALESCE(${events.type}, '')) ~*
-    '\bfan\b|health|wellness|medical|seminar|conference|forum|summit|trade fair|exhibition|expo|fan meet|fan party|fan meeting|fan engagement|convention|special event'
+    '\bfan\b|health|wellness|medical|seminar|conference|forum|summit|trade fair|exhibition|expo|fan meet|fan party|fan meeting|fan engagement|convention|special event|\bactivity\b|\bactivities\b'
+  OR (${events.dateEnd} IS NOT NULL AND ${events.dateEnd} - ${events.date} > interval '60 days')
 )`;
 
 // Only show events with a future date, or no date at all (unknown date = still relevant)

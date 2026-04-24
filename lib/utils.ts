@@ -116,7 +116,7 @@ export const KEY_VENUE_PATTERNS: RegExp[] = [
 
 /** Client-side guard for fan/health events that slip through the SQL filter */
 const FAN_NAME_RE = /fan\s*(meet|party|fest|sign|con|engagement|call|cafe|talk|event|day|showcase)|fanmeet|fanparty|fansign|fancon|meet\s*&\s*greet|hi[-\s]?touch|high\s*touch/i;
-const FAN_TYPE_RE = /\bfan\b|fan\s*(meet|party|meeting|engagement|fest)|health|wellness|medical|seminar|conference|forum|summit|trade\s*fair|exhibition|\bexpo\b/i;
+const FAN_TYPE_RE = /\bfan\b|fan\s*(meet|party|meeting|engagement|fest)|health|wellness|medical|seminar|conference|forum|summit|trade\s*fair|exhibition|\bexpo\b|\bactivity\b|\bactivities\b/i;
 const HEALTH_NAME_RE = /health\s*(fair|expo|talk|seminar|forum|summit|check|screening)|wellness\s*(fair|expo|seminar)|medical\s*(fair|expo)|life\s*expo/i;
 
 export function isExcludedEvent(name: string, type: string | null): boolean {

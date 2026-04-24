@@ -258,8 +258,10 @@ export function MarketRadar({ events }: { events: Event[] }) {
     return true;
   });
 
+  // When newOnly: show newest first (DESC from server). Otherwise show oldest-first (order added).
+  const sorted = newOnly ? filtered : [...filtered].reverse();
   // Show max 25 in the dashboard widget
-  const visible = filtered.slice(0, 25);
+  const visible = sorted.slice(0, 25);
   const totalCount = filtered.length;
 
   const iconBtnStyle = (active: boolean): React.CSSProperties => ({
